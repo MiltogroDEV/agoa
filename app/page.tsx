@@ -5,6 +5,7 @@ import Image from "next/image";
 import { Outfit } from "next/font/google";
 import { createClient } from "@supabase/supabase-js";
 import {
+  CloudDrizzle,
   Droplets,
   Minus,
   ShowerHead,
@@ -80,6 +81,7 @@ const COR = {
   seco: "#ffb86b",
   umido: "#9b8cff",
   temperatura: "#ff8f70",
+  ar: "#5fd7e8",
 };
 
 const VARS = {
@@ -97,8 +99,9 @@ const VARS = {
 } as React.CSSProperties;
 
 const chartConfig = {
-  umidade: { label: "Umidade", color: COR.marca },
+  umidade: { label: "Umidade do solo", color: COR.marca },
   temperatura: { label: "Temperatura", color: COR.temperatura },
+  umidadeAr: { label: "Umidade do ar", color: COR.ar },
 } satisfies ChartConfig;
 
 const MUTED = "text-[color:var(--muted)]";
@@ -112,6 +115,7 @@ type Ponto = { t: number; v: number };
 type AoVivo = {
   umidade: Ponto | null;
   temperatura: Ponto | null;
+  umidadeAr: Ponto | null;
   regas: number[]; // mais recentes primeiro
   regasHoje: number;
 };
@@ -122,6 +126,7 @@ type Historico = {
   ate: number;
   umidade: Ponto[];
   temperatura: Ponto[];
+  umidadeAr: Ponto[];
   regas: number[]; // ordem crescente
 };
 
@@ -219,13 +224,15 @@ function statusUmidade(v: number | null) {
 
 // Agrupa as leituras em ~96 faixas de tempo, fazendo a média de cada tabela.
 // Isso resolve o casamento entre umidade e temperatura, que vêm de tabelas separadas.
-function montarSerie(u: Ponto[], te: Ponto[], desde: number, ate: number) {
+function montarSerie(u: Ponto[], te: Ponto[], ar: Ponto[], desde: number, ate: number) {
   const N = 96;
   const passo = (ate - desde) / N;
   const somaU = Array<number>(N + 1).fill(0);
   const contU = Array<number>(N + 1).fill(0);
   const somaT = Array<number>(N + 1).fill(0);
   const contT = Array<number>(N + 1).fill(0);
+  const somaA = Array<number>(N + 1).fill(0);
+  const contA = Array<number>(N + 1).fill(0);
   const idx = (t: number) =>
     Math.min(N, Math.max(0, Math.floor((t - desde) / passo)));
 
@@ -240,13 +247,25 @@ function montarSerie(u: Ponto[], te: Ponto[], desde: number, ate: number) {
     contT[i]++;
   }
 
-  const saida: { t: number; umidade: number | null; temperatura: number | null }[] = [];
+  for (const p of ar) {
+    const i = idx(p.t);
+    somaA[i] += p.v;
+    contA[i]++;
+  }
+
+  const saida: {
+    t: number;
+    umidade: number | null;
+    temperatura: number | null;
+    umidadeAr: number | null;
+  }[] = [];
   for (let i = 0; i <= N; i++) {
-    if (!contU[i] && !contT[i]) continue;
+    if (!contU[i] && !contT[i] && !contA[i]) continue;
     saida.push({
       t: Math.min(ate, desde + i * passo + passo / 2),
       umidade: contU[i] ? arred1(somaU[i] / contU[i]) : null,
       temperatura: contT[i] ? arred1(somaT[i] / contT[i]) : null,
+      umidadeAr: contA[i] ? arred1(somaA[i] / contA[i]) : null,
     });
   }
   return saida;
@@ -361,14 +380,16 @@ function Numero({
   titulo,
   children,
   rodape,
+  className,
 }: {
   icone: React.ReactNode;
   titulo: string;
   children: React.ReactNode;
   rodape?: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <Painel className="h-full">
+    <Painel className={cn("h-full", className)}>
       <CardContent className="flex h-full flex-col justify-between gap-4 p-5 sm:p-6">
         <div className={cn("flex items-center gap-2 text-sm font-medium", MUTED)}>
           {icone}
@@ -407,7 +428,7 @@ export default function DashboardPage() {
   const carregarAoVivo = React.useCallback(async () => {
     const inicioDia = new Date();
     inicioDia.setHours(0, 0, 0, 0);
-    const [u, t, r, c] = await Promise.all([
+    const [u, t, r, c, a] = await Promise.all([
       supabase
         .from("historico_umidade")
         .select("created_at, umidade")
@@ -427,6 +448,11 @@ export default function DashboardPage() {
         .from("historico_rega")
         .select("id", { count: "exact", head: true })
         .gte("created_at", inicioDia.toISOString()),
+      supabase
+        .from("historico_umidade_ar")
+        .select("created_at, umidade_ar")
+        .order("created_at", { ascending: false })
+        .limit(1),
     ]);
 
     if (u.error || t.error || r.error || c.error) {
@@ -441,6 +467,10 @@ export default function DashboardPage() {
       temperatura: t.data?.[0]
         ? { t: Date.parse(t.data[0].created_at), v: t.data[0].temperatura }
         : null,
+      // a umidade do ar é opcional: se a tabela falhar, o resto do painel segue funcionando
+      umidadeAr: a.data?.[0]
+        ? { t: Date.parse(a.data[0].created_at), v: Number(a.data[0].umidade_ar) }
+        : null,
       regas: (r.data ?? []).map((x) => Date.parse(x.created_at)),
       regasHoje: c.count ?? 0,
     });
@@ -452,7 +482,7 @@ export default function DashboardPage() {
     const desde = ate - periodoAtual.ms;
     const iso = new Date(desde).toISOString();
     try {
-      const [u, te, r] = await Promise.all([
+      const [u, te, r, ar] = await Promise.all([
         buscarTudo<{ created_at: string; umidade: number }>(
           "historico_umidade",
           "created_at, umidade",
@@ -464,6 +494,11 @@ export default function DashboardPage() {
           iso
         ),
         buscarTudo<{ created_at: string }>("historico_rega", "created_at", iso),
+        buscarTudo<{ created_at: string; umidade_ar: number }>(
+          "historico_umidade_ar",
+          "created_at, umidade_ar",
+          iso
+        ).catch((): { created_at: string; umidade_ar: number }[] => []),
       ]);
       if (id !== reqHist.current) return; // chegou uma resposta mais nova
       setHist({
@@ -473,6 +508,9 @@ export default function DashboardPage() {
         umidade: u.map((x) => ({ t: Date.parse(x.created_at), v: x.umidade })).reverse(),
         temperatura: te
           .map((x) => ({ t: Date.parse(x.created_at), v: x.temperatura }))
+          .reverse(),
+        umidadeAr: ar
+          .map((x) => ({ t: Date.parse(x.created_at), v: Number(x.umidade_ar) }))
           .reverse(),
         regas: r.map((x) => Date.parse(x.created_at)).reverse(),
       });
@@ -497,17 +535,23 @@ export default function DashboardPage() {
 
   const umidadeAtual = aoVivo?.umidade?.v ?? null;
   const tempAtual = aoVivo?.temperatura?.v ?? null;
+  const arAtual = aoVivo?.umidadeAr?.v ?? null;
   const status = statusUmidade(umidadeAtual);
 
-  const ultimoSinal = Math.max(aoVivo?.umidade?.t ?? 0, aoVivo?.temperatura?.t ?? 0);
+  const ultimoSinal = Math.max(
+    aoVivo?.umidade?.t ?? 0,
+    aoVivo?.temperatura?.t ?? 0,
+    aoVivo?.umidadeAr?.t ?? 0
+  );
   const temSinal = ultimoSinal > 0;
   const online = agora !== null && temSinal && agora - ultimoSinal < OFFLINE_APOS_MS;
 
   const dados = React.useMemo(() => {
     if (!hist) return null;
-    const serie = montarSerie(hist.umidade, hist.temperatura, hist.desde, hist.ate);
+    const serie = montarSerie(hist.umidade, hist.temperatura, hist.umidadeAr, hist.desde, hist.ate);
     const u = resumo(hist.umidade);
     const t = resumo(hist.temperatura);
+    const ar = resumo(hist.umidadeAr);
 
     let intervaloMedio: number | null = null;
     if (hist.regas.length >= 2) {
@@ -535,7 +579,7 @@ export default function DashboardPage() {
       ? [Math.floor(Math.min(...temps) - 2), Math.ceil(Math.max(...temps) + 2)]
       : [0, 40];
 
-    return { serie, u, t, intervaloMedio, faixa, ticks, dominioTemp };
+    return { serie, u, t, ar, intervaloMedio, faixa, ticks, dominioTemp };
   }, [hist]);
 
   const delta = React.useMemo(() => {
@@ -707,7 +751,11 @@ export default function DashboardPage() {
                   <CardDescription className={cn("flex flex-wrap items-center gap-x-4 gap-y-1", MUTED)}>
                     <span className="inline-flex items-center gap-1.5">
                       <span className="h-2 w-2 rounded-full" style={{ backgroundColor: COR.marca }} />
-                      Umidade
+                      Umidade do solo
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: COR.ar }} />
+                      Umidade do ar
                     </span>
                     <span className="inline-flex items-center gap-1.5">
                       <span className="h-2 w-2 rounded-full" style={{ backgroundColor: COR.temperatura }} />
@@ -840,7 +888,7 @@ export default function DashboardPage() {
                                 </span>
                                 <span className="font-semibold tabular-nums text-white">
                                   {Number(value).toFixed(1).replace(".", ",")}
-                                  {chave === "umidade" ? "%" : "°C"}
+                                  {chave === "temperatura" ? "°C" : "%"}
                                 </span>
                               </div>
                             );
@@ -866,6 +914,16 @@ export default function DashboardPage() {
                       stroke="var(--color-umidade)"
                       strokeWidth={2.5}
                       fill="url(#fillUmidade)"
+                      dot={false}
+                      connectNulls
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      yAxisId="u"
+                      dataKey="umidadeAr"
+                      type="monotone"
+                      stroke="var(--color-umidadeAr)"
+                      strokeWidth={2}
                       dot={false}
                       connectNulls
                       isAnimationActive={false}
@@ -925,10 +983,11 @@ export default function DashboardPage() {
             </Painel>
 
             {/* Números rápidos */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-8 lg:col-start-5 lg:row-start-2 lg:gap-5 xl:col-span-9 xl:col-start-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-8 lg:col-start-5 lg:row-start-2 lg:gap-5 xl:col-span-9 xl:col-start-4 xl:grid-cols-6">
               <Numero
                 icone={<Thermometer className="h-4 w-4" aria-hidden />}
                 titulo="Temperatura do ar"
+                className="xl:col-span-3"
                 rodape={
                   dados?.t
                     ? `Mínima ${Math.round(dados.t.min)}°, máxima ${Math.round(dados.t.max)}° ${rotuloPeriodo}`
@@ -940,8 +999,23 @@ export default function DashboardPage() {
               </Numero>
 
               <Numero
+                icone={<CloudDrizzle className="h-4 w-4" aria-hidden />}
+                titulo="Umidade do ar"
+                className="xl:col-span-3"
+                rodape={
+                  dados?.ar
+                    ? `Mínima ${Math.round(dados.ar.min)}%, máxima ${Math.round(dados.ar.max)}% ${rotuloPeriodo}`
+                    : "Sem leituras no período"
+                }
+              >
+                {arAtual === null ? "--" : Math.round(arAtual)}
+                <span className={cn("ml-1 text-2xl font-medium", MUTED)}>%</span>
+              </Numero>
+
+              <Numero
                 icone={<ShowerHead className="h-4 w-4" aria-hidden />}
                 titulo="Última rega"
+                className="xl:col-span-2"
                 rodape={
                   aoVivo
                     ? aoVivo.regasHoje === 0
@@ -965,6 +1039,7 @@ export default function DashboardPage() {
               <Numero
                 icone={<Droplets className="h-4 w-4" aria-hidden />}
                 titulo="Regas no período"
+                className="xl:col-span-2"
                 rodape={
                   dados?.intervaloMedio
                     ? `Uma rega a cada ${duracao(dados.intervaloMedio)}, em média`
@@ -979,6 +1054,7 @@ export default function DashboardPage() {
               <Numero
                 icone={<Target className="h-4 w-4" aria-hidden />}
                 titulo="Tempo na faixa ideal"
+                className="sm:col-span-2 xl:col-span-2"
                 rodape={
                   dados?.faixa ? (
                     <div className="space-y-2">

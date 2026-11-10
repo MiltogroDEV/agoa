@@ -5,7 +5,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// deve sser assim {"umidade": 45, "temperatura": 28, "rega": true}
+// deve sser assim {"umidade": 45, "temperatura": 28, "umidade_ar": 36.5, "rega": true}
 export async function POST(request: Request) {
   try {
     const data = await request.json();
@@ -21,7 +21,12 @@ export async function POST(request: Request) {
       await supabase.from('historico_temperatura').insert([{ temperatura: data.temperatura }]);
     }
 
-    // 3. Regista a Rega (se o ESP32 enviou rega: true)
+    // 3. Salva a Umidade do Ar (se existir)
+    if (data.umidade_ar !== undefined) {
+      await supabase.from('historico_umidade_ar').insert([{ umidade_ar: data.umidade_ar }]);
+    }
+
+    // 4. Regista a Rega (se o ESP32 enviou rega: true)
     if (data.rega === true) {
       await supabase.from('historico_rega').insert([{}]);
     }
